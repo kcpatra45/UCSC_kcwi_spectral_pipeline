@@ -105,8 +105,9 @@ def interactive_rescale_and_approve_flux(
     Controls (interactive=True):
       - Use toolbar to zoom/pan.
       - Press 'z' to save zoomed view.
-      - Press 'a' to approve current scaling and continue.
-      - Press 'q' to abort.
+      - Press 'a' (or Enter) in the figure to approve current scaling and continue.
+      - Press 'q' in the figure to abort.
+      - If figure key events are missed, terminal prompts also provide approve/abort.
 
     After closing without approval, you'll be prompted in the terminal to update
     scales and the plot will reopen.
@@ -148,7 +149,7 @@ def interactive_rescale_and_approve_flux(
         decision = {"approved": False, "abort": False}
 
         def on_key(event):
-            if event.key == "a":
+            if event.key in ("a", "enter", "return"):
                 decision["approved"] = True
                 plt.close(fig)
             elif event.key == "q":
@@ -182,14 +183,23 @@ def interactive_rescale_and_approve_flux(
             return blue_scale, red_scale
 
         print("\nRescale options:")
+        print("  [a] Approve current scaling and continue")
         print("  [1] Multiply RED by factor")
         print("  [2] Multiply BLUE by factor")
         print("  [3] Set RED scale (absolute)")
         print("  [4] Set BLUE scale (absolute)")
+        print("  [q] Abort pipeline")
         print("  [Enter] Re-open plot with same scales")
         choice = input("Choice: ").strip()
 
-        if choice == "1":
+        if choice.lower() == "a":
+            with open(outdir / f"{objname}_join_scale.txt", "w") as f:
+                f.write(f"blue_scale {blue_scale}\n")
+                f.write(f"red_scale {red_scale}\n")
+            return blue_scale, red_scale
+        elif choice.lower() == "q":
+            raise RuntimeError("User aborted join rescale approval (terminal 'q').")
+        elif choice == "1":
             fac = float(input(f"Multiply RED by factor (current {red_scale}): ").strip())
             red_scale *= fac
         elif choice == "2":
