@@ -59,15 +59,19 @@ def get_lambda_axis(hdr: fits.Header, shape3: Tuple[int, int, int]) -> np.ndarra
 
 def white_light(cube: np.ndarray, lam: np.ndarray,
                 lam_min: Optional[float] = None, lam_max: Optional[float] = None) -> np.ndarray:
-    """Median-collapsed white-light image in a wavelength range."""
+    """Sum-collapsed white-light image in a wavelength range.
+
+    By default, use the central 20-80% of the wavelength axis. A sum collapse
+    makes narrow emission-line sources visible in aperture-placement images.
+    """
     if lam_min is None:
-        lam_min = float(np.nanpercentile(lam, 10))
+        lam_min = float(np.nanpercentile(lam, 20))
     if lam_max is None:
-        lam_max = float(np.nanpercentile(lam, 90))
+        lam_max = float(np.nanpercentile(lam, 80))
     m = (lam >= lam_min) & (lam <= lam_max)
     if not np.any(m):
         m[:] = True
-    return np.nanmedian(cube[m, :, :], axis=0)
+    return np.nansum(cube[m, :, :], axis=0)
 
 
 def get_airmass_from_header(hdr: fits.Header) -> Optional[float]:

@@ -118,6 +118,20 @@ class SpectralTrimConfig:
                 lam_max=r.get("lam_max", None),
             ),
         )
+
+
+@dataclass
+class CoaddConfig:
+    enabled: bool = False
+    input_dir: Optional[str] = None
+    list_file: Optional[str] = None
+    outdir: Optional[str] = None
+    method: str = "ivar_sigma_clip_mean"
+    sigma: float = 4.0
+    iters: int = 3
+    require_uncert: bool = True
+
+
 @dataclass
 class PipelineConfig:
     """All user-editable configuration in one place."""
@@ -126,6 +140,8 @@ class PipelineConfig:
     outdir: str = "kcwi_fluxcal_out"
     show_plots: bool = False
     interactive: bool = True
+
+    coadd: CoaddConfig = field(default_factory=CoaddConfig)
 
     # Standards and reference spectra
     fluxstd_blue: Optional[str] = None
@@ -162,6 +178,7 @@ class PipelineConfig:
             outdir=d.get("outdir", "kcwi_fluxcal_out"),
             show_plots=bool(d.get("show_plots", False)),
             interactive=bool(d.get("interactive", True)),
+            coadd=CoaddConfig(**d.get("coadd", {})),
             fluxstd_blue=d.get("fluxstd_blue"),
             fluxstd_red=d.get("fluxstd_red"),
             ref_blue=d.get("ref_blue"),

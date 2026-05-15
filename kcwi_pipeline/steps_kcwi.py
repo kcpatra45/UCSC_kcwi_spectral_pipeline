@@ -24,10 +24,11 @@ from .calibration import (
 )
 from .join import concat_join, plot_join_diagnostic, interactive_rescale_and_approve_flux
 from .trim import spectral_trim_cube
+from .coadd import coadd_directory
 
 
 def _ensure_dirs(ctx: PipelineContext) -> None:
-    for d in (ctx.apdir, ctx.caldir, ctx.countsdir, ctx.fluxdir, ctx.finaldir, ctx.diagdir):
+    for d in (ctx.coadd_outdir, ctx.apdir, ctx.caldir, ctx.countsdir, ctx.fluxdir, ctx.finaldir, ctx.diagdir):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -48,6 +49,31 @@ def step00_setup(ctx: PipelineContext) -> None:
     """Create output directories and write config.json."""
     _ensure_dirs(ctx)
     save_config(ctx.cfg, ctx.config_path)
+
+
+def step01_coadd_level2_cubes(ctx: PipelineContext) -> None:
+    """Optionally coadd individual KCWI DRP Level 2 cubes before discovery."""
+    if not ctx.cfg.coadd.enabled:
+        print("Coadd step disabled; using existing coadd_dir.")
+        return
+
+    input_dir = Path(ctx.cfg.coadd.input_dir or ctx.cfg.coadd_dir).expanduser().resolve()
+    outdir = Path(ctx.cfg.coadd.outdir).expanduser().resolve() if ctx.cfg.coadd.outdir else ctx.coadd_outdir
+    list_file = Path(ctx.cfg.coadd.list_file).expanduser().resolve() if ctx.cfg.coadd.list_file else None
+
+    outputs = coadd_directory(
+        input_dir,
+        outdir,
+        list_file=list_file,
+        method=ctx.cfg.coadd.method,
+        sigma=ctx.cfg.coadd.sigma,
+        iters=ctx.cfg.coadd.iters,
+        require_uncert=ctx.cfg.coadd.require_uncert,
+    )
+
+    ctx.cfg.coadd_dir = str(outdir)
+    save_config(ctx.cfg, ctx.config_path)
+    ctx.state.artifacts["coadd_outputs"] = outputs
 
 
 def step01_discover_coadds(ctx: PipelineContext) -> None:
@@ -586,6 +612,7 @@ def step05_process_all_objects(ctx: PipelineContext) -> None:
 def make_steps() -> List[Step]:
     return [
         Step("setup", "Create output dirs + write config.json", step00_setup),
+        Step("coadd", "Coadd KCWI Level 2 cubes if enabled", step01_coadd_level2_cubes),
         Step("discover", "Discover coadd cubes", step01_discover_coadds),
         Step("choose", "Choose flux standards + reference flux files", step02_choose_standards_and_refs),
         Step("apertures", "Define default target/background apertures (independent)", step03_define_default_apertures),

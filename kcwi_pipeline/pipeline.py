@@ -21,8 +21,12 @@ class PipelineContext:
         self.config_path = outdir / "config.json"
         self.state_path = outdir / "state.json"
         self.state = load_state(self.state_path)
+        self.only_objects = only_objects or []
+        self.skip_objects = skip_objects or []
+        self.redo_objects = redo_objects or []
 
         # subdirs (created by step00)
+        self.coadd_outdir = outdir / "coadds"
         self.apdir = outdir / "apertures"
         self.caldir = outdir / "calibration"
         self.countsdir = outdir / "extracted_counts"
