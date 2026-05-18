@@ -223,7 +223,7 @@ def step04_extract_standards_build_calibration(ctx: PipelineContext) -> None:
 
     lam_b_std, C_b_std = _extract_object_side(ctx, stdB, "BLUE")
     np.savetxt(
-        ctx.caldir / f"std_counts_{safe_filename(stdB)}_BLUE.txt",
+        ctx.caldir / f"std_counts_{safe_filename(stdB)}_BLUE.flm",
         np.c_[lam_b_std, C_b_std],
         header="lambda_A  counts_tgt_bkgsub",
     )
@@ -297,7 +297,7 @@ def step04_extract_standards_build_calibration(ctx: PipelineContext) -> None:
 
     lam_r_std, C_r_std = _extract_object_side(ctx, stdR, "RED")
     np.savetxt(
-        ctx.caldir / f"std_counts_{safe_filename(stdR)}_RED.txt",
+        ctx.caldir / f"std_counts_{safe_filename(stdR)}_RED.flm",
         np.c_[lam_r_std, C_r_std],
         header="lambda_A  counts_tgt_bkgsub",
     )
@@ -488,17 +488,17 @@ def step05_process_all_objects(ctx: PipelineContext) -> None:
         # BLUE
         if "BLUE" in cube_map[objname]:
             lam_b, C_b = _extract_object_side(ctx, objname, "BLUE")
-            np.savetxt(ctx.countsdir / f"{safe_filename(objname)}_BLUE_counts.txt",
+            np.savetxt(ctx.countsdir / f"{safe_filename(objname)}_BLUE_counts.flm",
                        np.c_[lam_b, C_b], header="lambda_A  counts_tgt_bkgsub")
             lam_b_cal, F_b_cal = apply_sensitivity(lam_b_ref, S_b, lam_b, C_b)
-            np.savetxt(ctx.fluxdir / f"{safe_filename(objname)}_BLUE_fluxcal_full.txt",
+            np.savetxt(ctx.fluxdir / f"{safe_filename(objname)}_BLUE_fluxcal_full.flm",
                        np.c_[lam_b_cal, F_b_cal], header="lambda_A  fluxcal_full")
             blue_full = (lam_b_cal, F_b_cal)
 
         # RED
         if "RED" in cube_map[objname]:
             lam_r, C_r = _extract_object_side(ctx, objname, "RED")
-            np.savetxt(ctx.countsdir / f"{safe_filename(objname)}_RED_counts.txt",
+            np.savetxt(ctx.countsdir / f"{safe_filename(objname)}_RED_counts.flm",
                        np.c_[lam_r, C_r], header="lambda_A  counts_tgt_bkgsub")
             lam_r_cal, F_r_cal = apply_sensitivity(lam_r_ref, S_r, lam_r, C_r)
 
@@ -517,7 +517,7 @@ def step05_process_all_objects(ctx: PipelineContext) -> None:
                                  ctx.diagdir / f"{safe_filename(objname)}_RED_O2corr.png",
                                  show=ctx.cfg.show_plots)
 
-            np.savetxt(ctx.fluxdir / f"{safe_filename(objname)}_RED_fluxcal_full_tellcorr.txt",
+            np.savetxt(ctx.fluxdir / f"{safe_filename(objname)}_RED_fluxcal_full_tellcorr.flm",
                        np.c_[lam_r_cal, F_r_tc], header="lambda_A  fluxcal_full_tellcorr")
             red_full = (lam_r_cal, F_r_tc)
 
@@ -549,10 +549,10 @@ def step05_process_all_objects(ctx: PipelineContext) -> None:
             lam_r2, F_r2 = np.array([]), np.array([])
 
         if blue_full is not None:
-            np.savetxt(ctx.finaldir / f"{safe_filename(objname)}_BLUE_fluxcal_trimmed_for_join.txt",
+            np.savetxt(ctx.finaldir / f"{safe_filename(objname)}_BLUE_fluxcal_trimmed_for_join.flm",
                        np.c_[lam_b2, F_b2], header="lambda_A  flux_blue_trimmed_for_join")
         if red_full is not None:
-            np.savetxt(ctx.finaldir / f"{safe_filename(objname)}_RED_fluxcal_trimmed_for_join.txt",
+            np.savetxt(ctx.finaldir / f"{safe_filename(objname)}_RED_fluxcal_trimmed_for_join.flm",
                        np.c_[lam_r2, F_r2], header="lambda_A  flux_red_trimmed_for_join")
 
         # --- Join (KCWI-style concatenation) with optional interactive rescaling ---
@@ -581,7 +581,7 @@ def step05_process_all_objects(ctx: PipelineContext) -> None:
             lamJ, FJ = lam_r2, F_r2s
 
         np.savetxt(
-            ctx.finaldir / f"{safe_filename(objname)}_BLUE+RED_joined_concat.txt",
+            ctx.finaldir / f"{safe_filename(objname)}_BLUE+RED_joined_concat.flm",
             np.c_[lamJ, FJ],
             header=f"lambda_A  flux_joined_concat  (blue_scale={blue_scale}, red_scale={red_scale})",
         )
@@ -598,11 +598,11 @@ def step05_process_all_objects(ctx: PipelineContext) -> None:
             "process_complete": True,
             "join_scale": {"blue": float(blue_scale), "red": float(red_scale)},
             "outputs": {
-                "blue_counts": str(ctx.countsdir / f"{safe_filename(objname)}_BLUE_counts.txt"),
-                "red_counts": str(ctx.countsdir / f"{safe_filename(objname)}_RED_counts.txt"),
-                "blue_fluxcal": str(ctx.fluxdir / f"{safe_filename(objname)}_BLUE_fluxcal_full.txt") if ("BLUE" in cube_map[objname]) else None,
-                "red_fluxcal": str(ctx.fluxdir / f"{safe_filename(objname)}_RED_fluxcal_full.txt") if ("RED" in cube_map[objname]) else None,
-                "joined": str(ctx.finaldir / f"{safe_filename(objname)}_BLUE+RED_joined_concat.txt"),
+                "blue_counts": str(ctx.countsdir / f"{safe_filename(objname)}_BLUE_counts.flm"),
+                "red_counts": str(ctx.countsdir / f"{safe_filename(objname)}_RED_counts.flm"),
+                "blue_fluxcal": str(ctx.fluxdir / f"{safe_filename(objname)}_BLUE_fluxcal_full.flm") if ("BLUE" in cube_map[objname]) else None,
+                "red_fluxcal": str(ctx.fluxdir / f"{safe_filename(objname)}_RED_fluxcal_full.flm") if ("RED" in cube_map[objname]) else None,
+                "joined": str(ctx.finaldir / f"{safe_filename(objname)}_BLUE+RED_joined_concat.flm"),
             },
         }
         ctx.save_state()

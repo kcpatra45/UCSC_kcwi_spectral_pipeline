@@ -162,6 +162,22 @@ def apply_o2_telluric_correction(
     return F_corr
 
 
+def scaled_o2_transmission(
+    T_std: np.ndarray,
+    X_std: Optional[float],
+    X_sci: Optional[float],
+    o2_mask: np.ndarray,
+    min_T: float = 0.02,
+) -> np.ndarray:
+    """Return the transmission curve actually used for an airmass-scaled O2 correction."""
+    T_scaled = np.ones_like(T_std, dtype=float)
+    if X_std is None or X_sci is None:
+        return T_scaled
+    p = float(X_sci) / float(X_std)
+    T_scaled[o2_mask] = np.clip(T_std[o2_mask], min_T, 1.0) ** p
+    return T_scaled
+
+
 # ----------------------------
 # Diagnostics
 # ----------------------------
@@ -295,3 +311,62 @@ def plot_o2_before_after(
     plt.title(f"{objname} RED: O2 correction")
     plt.legend()
     savefig_show(outpng, show)
+
+
+def plot_o2_correction_diagnostic(
+    objname: str,
+    lam_ref: np.ndarray,
+    F_before: np.ndarray,
+    F_after: np.ndarray,
+    T_std: np.ndarray,
+    T_scaled: np.ndarray,
+    o2_mask: np.ndarray,
+    o2_windows: List[Tuple[float, float]],
+    outpng: Path,
+    show: bool,
+) -> None:
+    """Detailed RED O2 diagnostic with full spectrum plus zoomed correction windows."""
+    fig, axes = plt.subplots(2, 2, figsize=(12, 7), constrained_layout=True)
+    ax_full = axes[0, 0]
+    ax_trans = axes[1, 0]
+    zoom_axes = [axes[0, 1], axes[1, 1]]
+
+    ax_full.plot(lam_ref, F_before, lw=0.9, alpha=0.65, label="Before O2 corr")
+    ax_full.plot(lam_ref, F_after, lw=0.9, alpha=0.9, label="After O2 corr")
+    for lo, hi in o2_windows:
+        ax_full.axvspan(lo, hi, alpha=0.15)
+    ax_full.set_xlabel("Wavelength (A)")
+    ax_full.set_ylabel("Flux")
+    ax_full.set_title(f"{objname} RED: full spectrum")
+    ax_full.legend()
+
+    ax_trans.plot(lam_ref, T_std, lw=0.9, label="Standard transmission")
+    ax_trans.plot(lam_ref, T_scaled, lw=0.9, label="Airmass-scaled transmission")
+    ax_trans.plot(lam_ref, 1.0 / np.clip(T_scaled, 0.02, None), lw=0.9, alpha=0.8, label="Applied correction factor")
+    for lo, hi in o2_windows:
+        ax_trans.axvspan(lo, hi, alpha=0.15)
+    ax_trans.set_xlabel("Wavelength (A)")
+    ax_trans.set_ylabel("Transmission / factor")
+    ax_trans.set_ylim(0, max(1.2, float(np.nanpercentile(1.0 / np.clip(T_scaled[o2_mask], 0.02, None), 98)) * 1.1) if np.any(o2_mask) else 1.2)
+    ax_trans.set_title("Telluric model used")
+    ax_trans.legend(fontsize=8)
+
+    for ax, (lo, hi) in zip(zoom_axes, o2_windows):
+        m = np.isfinite(lam_ref) & (lam_ref >= lo) & (lam_ref <= hi)
+        ax.plot(lam_ref[m], F_before[m], lw=0.9, alpha=0.65, label="Before")
+        ax.plot(lam_ref[m], F_after[m], lw=0.9, alpha=0.9, label="After")
+        ax_t = ax.twinx()
+        ax_t.plot(lam_ref[m], T_scaled[m], lw=0.8, color="tab:green", alpha=0.85, label="T scaled")
+        ax.set_xlim(lo, hi)
+        ax_t.set_ylim(0, 1.05)
+        ax.set_xlabel("Wavelength (A)")
+        ax.set_ylabel("Flux")
+        ax_t.set_ylabel("T scaled")
+        ax.set_title(f"O2 window {lo:.0f}-{hi:.0f} A")
+
+    outpng = Path(outpng)
+    outpng.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(outpng, dpi=180, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
