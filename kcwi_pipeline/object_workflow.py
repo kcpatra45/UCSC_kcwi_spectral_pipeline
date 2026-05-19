@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
+from matplotlib.widgets import Button, Slider
 from astropy.io import fits
 from astropy.stats import sigma_clip
 from scipy.interpolate import UnivariateSpline
@@ -36,9 +37,14 @@ DEFAULT_SIDE_RANGES = {
     "RED": (5650.0, 8800.0),
 }
 
+FLUX_UNIT_LABEL = "1e-15 erg/s/cm^2/A"
 O2_WINDOWS = [(6860.0, 6935.0), (7590.0, 7690.0)]
 TELLURIC_MIN_T = 0.02
 TELLURIC_TEMPLATE_SMOOTH_S = 0.001
+BACKGROUND_CLIP_SIGMA = 2.5
+BACKGROUND_CLIP_MAXITERS = 5
+COADD_CLIP_SIGMA = 2.0
+COADD_CLIP_MAXITERS = 5
 
 
 @dataclass
@@ -115,7 +121,10 @@ def _extract_counts_with_uncert(
         f"({n_tgt_nonzero} touched), background={bkg_area:.2f} spaxels "
         f"({n_bkg_nonzero} touched); exact fractional-pixel masks"
     )
-    print(f"{prefix}Background estimator: sigma-clipped weighted mean per wavelength slice.")
+    print(
+        f"{prefix}Background estimator: sigma-clipped weighted mean per wavelength slice "
+        f"(sigma={BACKGROUND_CLIP_SIGMA:g}, maxiters={BACKGROUND_CLIP_MAXITERS})."
+    )
     if tgt_area < 3:
         print(f"{prefix}WARNING: target aperture effective area is only {tgt_area:.2f} spaxels; extraction may be unstable.")
     elif tgt_area < 10:
@@ -147,7 +156,12 @@ def _extract_counts_with_uncert(
         if np.any(finite_bkg):
             bkg_vals = img[finite_bkg].astype(float)
             bkg_weights = w_bkg[finite_bkg].astype(float)
-            clipped = sigma_clip(bkg_vals, sigma=3.0, maxiters=3, masked=True)
+            clipped = sigma_clip(
+                bkg_vals,
+                sigma=BACKGROUND_CLIP_SIGMA,
+                maxiters=BACKGROUND_CLIP_MAXITERS,
+                masked=True,
+            )
             keep = ~np.ma.getmaskarray(clipped)
             if np.any(keep):
                 bkg = float(np.average(bkg_vals[keep], weights=bkg_weights[keep]))
@@ -168,12 +182,13 @@ def _extract_counts_with_uncert(
 
 def _save_spectrum(path: Path, lam: np.ndarray, y: np.ndarray, sigma: Optional[np.ndarray], header: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    unit_suffix = f"_{FLUX_UNIT_LABEL.replace(' ', '_').replace('/', '_per_').replace('^', '')}" if header == "flux" else ""
     if sigma is None:
         arr = np.c_[lam, y]
-        hdr = f"lambda_A  {header}"
+        hdr = f"lambda_A  {header}{unit_suffix}"
     else:
         arr = np.c_[lam, y, sigma]
-        hdr = f"lambda_A  {header}  sigma_{header}"
+        hdr = f"lambda_A  {header}{unit_suffix}  sigma_{header}{unit_suffix}"
     np.savetxt(path, arr, header=hdr)
 
 
@@ -200,7 +215,61 @@ def _plot_spectrum_png(
             pad = 0.1 * (y1 - y0)
             ax.set_ylim(y0 - pad, y1 + pad)
     ax.set_xlabel("Wavelength (A)")
-    ax.set_ylabel("Flux")
+    ax.set_ylabel(f"Flux ({FLUX_UNIT_LABEL})")
+    ax.set_title(title)
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+def _plot_joined_spectrum_png(
+    path: Path,
+    title: str,
+    lam_blue: np.ndarray,
+    flux_blue: np.ndarray,
+    sigma_blue: Optional[np.ndarray],
+    lam_red: np.ndarray,
+    flux_red: np.ndarray,
+    sigma_red: Optional[np.ndarray],
+    *,
+    show: bool = False,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(11, 4.5))
+    ax.plot(lam_blue, flux_blue, lw=1.0, color="tab:blue", label="BLUE")
+    ax.plot(lam_red, flux_red, lw=1.0, color="tab:red", label="RED")
+    if sigma_blue is not None:
+        ax.fill_between(
+            lam_blue,
+            flux_blue - sigma_blue,
+            flux_blue + sigma_blue,
+            color="tab:blue",
+            alpha=0.14,
+            linewidth=0,
+            label="BLUE 1 sigma",
+        )
+    if sigma_red is not None:
+        ax.fill_between(
+            lam_red,
+            flux_red - sigma_red,
+            flux_red + sigma_red,
+            color="tab:red",
+            alpha=0.14,
+            linewidth=0,
+            label="RED 1 sigma",
+        )
+    both_flux = np.concatenate([np.asarray(flux_blue, dtype=float), np.asarray(flux_red, dtype=float)])
+    finite = np.isfinite(both_flux)
+    if np.any(finite):
+        y0, y1 = np.nanpercentile(both_flux[finite], [1, 99])
+        if np.isfinite(y0) and np.isfinite(y1) and y1 > y0:
+            pad = 0.1 * (y1 - y0)
+            ax.set_ylim(y0 - pad, y1 + pad)
+    ax.set_xlabel("Wavelength (A)")
+    ax.set_ylabel(f"Flux ({FLUX_UNIT_LABEL})")
     ax.set_title(title)
     ax.grid(alpha=0.2)
     ax.legend()
@@ -213,8 +282,8 @@ def _plot_spectrum_png(
 def _coadd_1d_spectra(
     spectra: List[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]],
     *,
-    sigma_clip_value: float = 4.0,
-    maxiters: int = 3,
+    sigma_clip_value: float = COADD_CLIP_SIGMA,
+    maxiters: int = COADD_CLIP_MAXITERS,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray]:
     if not spectra:
         raise ValueError("No spectra to coadd")
@@ -277,11 +346,27 @@ def _plot_1d_coadd_diagnostic(
     show: bool,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig, (ax_spec, ax_n) = plt.subplots(
-        2, 1, figsize=(11, 6.5), sharex=True,
-        gridspec_kw={"height_ratios": [4, 1]},
-        constrained_layout=True,
-    )
+    fig, (ax_spec, ax_n) = plt.subplots(2, 1, figsize=(11, 6.5), sharex=True, gridspec_kw={"height_ratios": [4, 1]})
+    _draw_1d_coadd_diagnostic_axes(ax_spec, ax_n, title, spectra, lam_coadd, flux_coadd, sigma_coadd, n_good)
+    fig.tight_layout()
+    fig.savefig(path, dpi=180, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+def _draw_1d_coadd_diagnostic_axes(
+    ax_spec,
+    ax_n,
+    title: str,
+    spectra: List[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]],
+    lam_coadd: np.ndarray,
+    flux_coadd: np.ndarray,
+    sigma_coadd: Optional[np.ndarray],
+    n_good: np.ndarray,
+) -> None:
+    ax_spec.clear()
+    ax_n.clear()
 
     finite_coadd = np.isfinite(flux_coadd)
     if np.any(finite_coadd):
@@ -338,10 +423,96 @@ def _plot_1d_coadd_diagnostic(
     ax_n.set_xlabel("Wavelength (A)")
     ax_n.grid(alpha=0.2)
 
-    fig.savefig(path, dpi=180, bbox_inches="tight")
-    if show:
-        plt.show()
-    plt.close(fig)
+
+def _review_1d_coadd_sigma_clip(
+    path: Path,
+    title: str,
+    spectra: List[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]],
+    *,
+    initial_sigma: float = COADD_CLIP_SIGMA,
+    maxiters: int = COADD_CLIP_MAXITERS,
+    show: bool,
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, float]:
+    lam, flux, sigma, n_good = _coadd_1d_spectra(
+        spectra,
+        sigma_clip_value=initial_sigma,
+        maxiters=maxiters,
+    )
+    if not show:
+        _plot_1d_coadd_diagnostic(path, title, spectra, lam, flux, sigma, n_good, show=False)
+        return lam, flux, sigma, n_good, float(initial_sigma)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state = {
+        "approved": False,
+        "sigma_clip": float(initial_sigma),
+        "lam": lam,
+        "flux": flux,
+        "sigma": sigma,
+        "n_good": n_good,
+    }
+    fig, (ax_spec, ax_n) = plt.subplots(2, 1, figsize=(11, 7.1), sharex=True, gridspec_kw={"height_ratios": [4, 1]})
+    fig.subplots_adjust(left=0.08, right=0.97, bottom=0.18, top=0.88, hspace=0.08)
+
+    ax_slider = fig.add_axes([0.16, 0.085, 0.55, 0.028])
+    ax_reset = fig.add_axes([0.74, 0.065, 0.09, 0.06])
+    ax_approve = fig.add_axes([0.85, 0.065, 0.10, 0.06])
+    slider = Slider(ax_slider, "Clip sigma", 0.5, 6.0, valinit=float(initial_sigma), valstep=0.1)
+    reset_button = Button(ax_reset, "Reset")
+    approve_button = Button(ax_approve, "Approve")
+
+    def recompute(sigma_clip_value: float) -> None:
+        lam_i, flux_i, sigma_i, n_good_i = _coadd_1d_spectra(
+            spectra,
+            sigma_clip_value=float(sigma_clip_value),
+            maxiters=maxiters,
+        )
+        state["sigma_clip"] = float(sigma_clip_value)
+        state["lam"] = lam_i
+        state["flux"] = flux_i
+        state["sigma"] = sigma_i
+        state["n_good"] = n_good_i
+        full_title = (
+            f"{title}\nclip sigma={float(sigma_clip_value):.1f}, maxiters={maxiters}; "
+            "a/Enter=approve, q=abort"
+        )
+        _draw_1d_coadd_diagnostic_axes(ax_spec, ax_n, full_title, spectra, lam_i, flux_i, sigma_i, n_good_i)
+        fig.canvas.draw_idle()
+
+    def approve(_event=None) -> None:
+        state["approved"] = True
+        fig.savefig(path, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+
+    def reset(_event=None) -> None:
+        slider.set_val(float(initial_sigma))
+
+    def on_key(event) -> None:
+        if event.key in ("a", "enter", "return"):
+            approve()
+        elif event.key == "q":
+            plt.close(fig)
+
+    slider.on_changed(recompute)
+    reset_button.on_clicked(reset)
+    approve_button.on_clicked(approve)
+    cid = fig.canvas.mpl_connect("key_press_event", on_key)
+    fig._kcwi_coadd_widgets = (slider, reset_button, approve_button)
+
+    recompute(float(initial_sigma))
+    plt.show()
+    fig.canvas.mpl_disconnect(cid)
+
+    if not state["approved"]:
+        raise RuntimeError("Sigma-clipped coadd was not approved")
+
+    return (
+        state["lam"],
+        state["flux"],
+        state["sigma"],
+        state["n_good"],
+        float(state["sigma_clip"]),
+    )
 
 
 def _side_files(object_dir: Path, side: str) -> List[Path]:
@@ -508,7 +679,8 @@ def interactive_continuum_spline(
     title: str,
     show: bool,
     exclude_windows: Optional[List[Tuple[float, float]]] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+    initial_points: Optional[List[Tuple[float, float]]] = None,
+) -> Tuple[np.ndarray, np.ndarray, List[Tuple[float, float]]]:
     """Pick continuum points on a standard spectrum and return continuum + sensitivity."""
     good = np.isfinite(lam) & np.isfinite(counts) & np.isfinite(ref_flux) & (ref_flux > 0)
     if np.count_nonzero(good) < 8:
@@ -528,7 +700,13 @@ def interactive_continuum_spline(
     y_seed = counts[continuum_seed]
     x_init = np.nanpercentile(x_seed, qs)
     y_init = np.interp(x_init, x_seed, y_seed)
-    points: List[Tuple[float, float]] = list(zip(x_init, y_init))
+    default_points: List[Tuple[float, float]] = list(zip(x_init, y_init))
+    if initial_points is not None and len(initial_points) >= 2:
+        points = [(float(x), float(y)) for x, y in initial_points if np.isfinite(x) and np.isfinite(y)]
+        if len(points) < 2:
+            points = list(default_points)
+    else:
+        points = list(default_points)
     accepted = {"done": False}
 
     fig, (ax_obs, ax_sens) = plt.subplots(2, 1, figsize=(11, 7), sharex=True, constrained_layout=True)
@@ -570,7 +748,7 @@ def interactive_continuum_spline(
         ax_obs.grid(alpha=0.2)
 
         ax_ref.plot(lam_g, ref_g, lw=0.9, color="tab:blue", alpha=0.55, label="AB reference flux")
-        ax_ref.set_ylabel("Reference flux (1e-16 cgs/A)")
+        ax_ref.set_ylabel(f"Reference flux ({FLUX_UNIT_LABEL})")
         ax_ref.yaxis.set_label_position("right")
         ax_ref.yaxis.tick_right()
         ax_ref.tick_params(axis="y", colors="tab:blue")
@@ -727,7 +905,7 @@ def interactive_continuum_spline(
                 fig.canvas.draw_idle()
         elif event.key == "r":
             points.clear()
-            points.extend(zip(x_init, y_init))
+            points.extend(default_points)
             redraw()
 
     cids = [
@@ -746,7 +924,7 @@ def interactive_continuum_spline(
     continuum = _continuum_from_points_excluding_windows(lam, points, exclude_windows)
     with np.errstate(divide="ignore", invalid="ignore"):
         sensitivity = ref_flux / continuum
-    return continuum, sensitivity
+    return continuum, sensitivity, sorted(points, key=lambda item: item[0])
 
 
 def _extract_side(
@@ -769,6 +947,10 @@ def _extract_side(
     extracted: List[ExposureSpectrum] = []
     spectra_for_coadd: List[Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = []
     current_aps: Optional[TargetBackgroundApertures] = None
+    print(
+        f"[{object_dir.name} {side}] Aperture propagation: first approved aperture is proposed "
+        "for subsequent exposures; later exposure-specific saved apertures are overwritten after approval."
+    )
 
     for i, path in enumerate(files):
         exposure_label = f"{object_dir.name} {side} exposure {i + 1}/{len(files)}"
@@ -778,13 +960,23 @@ def _extract_side(
         img = white_light(cube, lam, lam_min=lo, lam_max=hi)
 
         ap_path = ap_dir / f"{path.stem}_aperture.json"
-        if ap_path.exists() and not redo_apertures:
+        if current_aps is None and ap_path.exists() and not redo_apertures:
             aps = _aperture_from_json(ap_path)
-            aps = review_apertures(img, aps, side_label=f"{exposure_label}: saved aperture", show=show_plots)
+            aps = review_apertures(
+                img,
+                aps,
+                side_label=f"{exposure_label}: saved first-exposure aperture",
+                show=show_plots,
+            )
         elif current_aps is not None:
             plot_apertures(img, current_aps, diag_dir / f"{path.stem}_aperture_reuse_preview.png",
-                           title=f"{exposure_label}: proposed reused aperture", show=False)
-            aps = review_apertures(img, current_aps, side_label=f"{exposure_label}: proposed reused aperture", show=show_plots)
+                           title=f"{exposure_label}: proposed current aperture", show=False)
+            aps = review_apertures(
+                img,
+                current_aps,
+                side_label=f"{exposure_label}: proposed current aperture",
+                show=show_plots,
+            )
         else:
             aps = interactive_define_apertures(img, exposure_label, show=show_plots)
 
@@ -809,21 +1001,18 @@ def _extract_side(
         )
         print(f"Extracted {exposure_label} -> {spec_path}")
 
-    lam_c, counts_c, sigma_c, n_good = _coadd_1d_spectra(spectra_for_coadd)
-    out_path = coadd_dir / f"{object_dir.name}_{side}_counts_coadd.flm"
-    _save_spectrum(out_path, lam_c, counts_c, sigma_c, "counts_coadd")
-    np.savetxt(coadd_dir / f"{object_dir.name}_{side}_nexp.txt", np.c_[lam_c, n_good], header="lambda_A  n_exposures_used")
     coadd_diag_path = diag_dir / f"{object_dir.name}_{side}_coadd_diagnostic.png"
-    _plot_1d_coadd_diagnostic(
+    lam_c, counts_c, sigma_c, n_good, coadd_clip_sigma = _review_1d_coadd_sigma_clip(
         coadd_diag_path,
         f"{object_dir.name} {side}: extracted spectra and sigma-clipped coadd",
         spectra_for_coadd,
-        lam_c,
-        counts_c,
-        sigma_c,
-        n_good,
+        initial_sigma=COADD_CLIP_SIGMA,
+        maxiters=COADD_CLIP_MAXITERS,
         show=show_coadd_diagnostic,
     )
+    out_path = coadd_dir / f"{object_dir.name}_{side}_counts_coadd.flm"
+    _save_spectrum(out_path, lam_c, counts_c, sigma_c, "counts_coadd")
+    np.savetxt(coadd_dir / f"{object_dir.name}_{side}_nexp.txt", np.c_[lam_c, n_good], header="lambda_A  n_exposures_used")
 
     state_path = object_dir / "extraction_state.json"
     state = {}
@@ -832,12 +1021,14 @@ def _extract_side(
             state = json.load(f)
     state.setdefault("sides", {})[side] = {
         "coadd_counts": str(out_path),
+        "coadd_clip_sigma": coadd_clip_sigma,
+        "coadd_clip_maxiters": COADD_CLIP_MAXITERS,
         "exposures": [asdict(item) for item in extracted],
     }
     with open(state_path, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
 
-    print(f"Coadded {side} 1D spectra -> {out_path}")
+    print(f"Coadded {side} 1D spectra with sigma={coadd_clip_sigma:g} -> {out_path}")
     print(f"Saved {side} coadd diagnostic -> {coadd_diag_path}")
     return out_path
 
@@ -872,8 +1063,127 @@ def _load_existing_fluxcal_side(object_dir: Path, side: str) -> Optional[Tuple[n
     if path is None:
         return None
     lam, flux, sigma = _load_txt_spectrum(path)
+    if path.suffix == ".txt":
+        print(f"Converting legacy {side} fluxcal file from 1e-16 to 1e-15 units for join reuse: {path}")
+        flux = flux * 0.1
+        sigma = sigma * 0.1 if sigma is not None else None
     lam, flux, sigma = _trim_side_arrays(side, lam, flux, sigma)
     return lam, flux, sigma
+
+
+def _calibration_flux_unit_scale(cal: Dict[str, object]) -> float:
+    units = str(cal.get("reference_units", "")).replace(" ", "").lower()
+    if "1e-16" in units:
+        return 0.1
+    return 1.0
+
+
+def _join_science_flux_sides(
+    object_dir: Path,
+    flux_paths: Dict[str, Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]],
+    *,
+    show_plots: bool,
+) -> bool:
+    final_dir = object_dir / "final"
+    final_dir.mkdir(parents=True, exist_ok=True)
+
+    if "BLUE" not in flux_paths or "RED" not in flux_paths:
+        return False
+
+    lam_b, flux_b, sig_b = flux_paths["BLUE"]
+    lam_r, flux_r, sig_r = flux_paths["RED"]
+    blue_scale, red_scale = interactive_rescale_and_approve_flux(
+        objname=object_dir.name,
+        lam_blue=lam_b,
+        flux_blue=flux_b,
+        lam_red=lam_r,
+        flux_red=flux_r,
+        outdir=final_dir,
+        show=True,
+        interactive=True,
+    )
+    flux_b_scaled = flux_b * blue_scale
+    flux_r_scaled = flux_r * red_scale
+    sig_b_scaled = sig_b * abs(blue_scale) if sig_b is not None else None
+    sig_r_scaled = sig_r * abs(red_scale) if sig_r is not None else None
+
+    lam_j, flux_j = concat_join(lam_b, flux_b_scaled, lam_r, flux_r_scaled)
+    if sig_b is not None and sig_r is not None:
+        lam_s, sig_j = concat_join(lam_b, sig_b_scaled, lam_r, sig_r_scaled)
+        order = np.argsort(lam_s)
+        sig_j = sig_j[order] if not np.allclose(lam_s, lam_j) else sig_j
+    else:
+        sig_j = None
+
+    out_path = final_dir / f"{object_dir.name}_BLUE+RED_spectrum.flm"
+    _save_spectrum(out_path, lam_j, flux_j, sig_j, "flux")
+    _plot_joined_spectrum_png(
+        final_dir / f"{object_dir.name}_BLUE+RED_spectrum.png",
+        f"{object_dir.name}: final BLUE+RED spectrum",
+        lam_b,
+        flux_b_scaled,
+        sig_b_scaled,
+        lam_r,
+        flux_r_scaled,
+        sig_r_scaled,
+        show=True,
+    )
+    plot_join_diagnostic(
+        object_dir.name,
+        lam_b,
+        flux_b_scaled,
+        lam_r,
+        flux_r_scaled,
+        outpng=final_dir / f"{object_dir.name}_joined.png",
+        show=show_plots,
+    )
+    print(f"Saved joined spectrum -> {out_path}")
+    return True
+
+
+def join_existing_science_sides(object_dir: Path, *, show_plots: bool = False) -> None:
+    object_dir = object_dir.expanduser().resolve()
+    flux_paths: Dict[str, Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = {}
+    for side in ("BLUE", "RED"):
+        existing = _load_existing_fluxcal_side(object_dir, side)
+        if existing is None:
+            print(f"No existing {side} flux-calibrated spectrum found at {_existing_fluxcal_path(object_dir, side)}")
+        else:
+            flux_paths[side] = existing
+            print(f"Loaded existing flux-calibrated {side} spectrum -> {_find_existing_fluxcal_path(object_dir, side)}")
+
+    if not _join_science_flux_sides(object_dir, flux_paths, show_plots=show_plots):
+        raise FileNotFoundError(
+            f"Join-only requires both BLUE and RED fluxcal spectra under {object_dir / 'fluxcal'}"
+        )
+
+
+def _load_spline_points(paths: List[Path]) -> Optional[List[Tuple[float, float]]]:
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            arr = np.loadtxt(path, comments="#")
+        except Exception as exc:
+            print(f"WARNING: could not load saved spline points from {path}: {exc}")
+            continue
+        if arr.ndim == 1:
+            arr = arr[None, :]
+        if arr.shape[1] < 2 or arr.shape[0] < 2:
+            print(f"WARNING: saved spline point file has too few points: {path}")
+            continue
+        points = [(float(row[0]), float(row[1])) for row in arr if np.isfinite(row[0]) and np.isfinite(row[1])]
+        if len(points) >= 2:
+            print(f"Loaded {len(points)} saved continuum spline points from {path}")
+            return points
+    return None
+
+
+def _save_spline_points(paths: List[Path], points: List[Tuple[float, float]]) -> None:
+    arr = np.asarray(sorted(points, key=lambda item: item[0]), dtype=float)
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savetxt(path, arr, header="lambda_A  observed_continuum_counts_point")
 
 
 def _build_standard_calibrations(
@@ -891,19 +1201,7 @@ def _build_standard_calibrations(
         lam_std, counts, sigma_counts = _load_txt_spectrum(counts_path)
         lam_std, counts, sigma_counts = _trim_side_arrays(side, lam_std, counts, sigma_counts)
         star_id, star_name = _choose_standard_star(standard_name)
-        flux_ref = reference_flux(star_id, lam_std, scaled_1e16=True)
-        continuum, sens = interactive_continuum_spline(
-            lam_std,
-            counts,
-            flux_ref,
-            title=f"{standard_name} {side}: continuum fit for {star_name}",
-            show=show_plots,
-            exclude_windows=O2_WINDOWS if side == "RED" else None,
-        )
-        lam_cal_std, flux_cal_std = apply_sensitivity(lam_std, sens, lam_std, counts)
-        sigma_flux_std = np.abs(sens) * sigma_counts if sigma_counts is not None else None
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ratio = flux_ref / continuum
+        flux_ref = reference_flux(star_id, lam_std, scale_1e15=True)
 
         outdir = calib_dir / standard_name / side
         object_diag_dir = object_dir / "diagnostics" / side / "standard_calibration"
@@ -913,12 +1211,31 @@ def _build_standard_calibrations(
         object_diag_dir.mkdir(parents=True, exist_ok=True)
         object_flux_dir.mkdir(parents=True, exist_ok=True)
         object_final_dir.mkdir(parents=True, exist_ok=True)
+        spline_points_path = outdir / f"continuum_spline_points_{side}.txt"
+        object_spline_points_path = object_diag_dir / f"continuum_spline_points_{side}.txt"
+        initial_points = _load_spline_points([object_spline_points_path, spline_points_path])
+
+        continuum, sens, spline_points = interactive_continuum_spline(
+            lam_std,
+            counts,
+            flux_ref,
+            title=f"{standard_name} {side}: continuum fit for {star_name}",
+            show=show_plots,
+            exclude_windows=O2_WINDOWS if side == "RED" else None,
+            initial_points=initial_points,
+        )
+        _save_spline_points([spline_points_path, object_spline_points_path], spline_points)
+        lam_cal_std, flux_cal_std = apply_sensitivity(lam_std, sens, lam_std, counts)
+        sigma_flux_std = np.abs(sens) * sigma_counts if sigma_counts is not None else None
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = flux_ref / continuum
+
         sens_path = outdir / f"sensitivity_{side}.txt"
         continuum_path = outdir / f"observed_continuum_{side}.txt"
         ref_path = outdir / f"ab_reference_flux_{side}.txt"
         np.savetxt(sens_path, np.c_[lam_std, sens], header="lambda_A  S_lambda")
         np.savetxt(continuum_path, np.c_[lam_std, continuum], header="lambda_A  observed_continuum_counts")
-        np.savetxt(ref_path, np.c_[lam_std, flux_ref], header="lambda_A  reference_flux_1e-16_erg_s_cm2_A")
+        np.savetxt(ref_path, np.c_[lam_std, flux_ref], header="lambda_A  reference_flux_1e-15_erg_s_cm2_A")
 
         item: Dict[str, object] = {
             "standard_name": standard_name,
@@ -929,8 +1246,9 @@ def _build_standard_calibrations(
             "counts_file": str(counts_path),
             "reference_flux_file": str(ref_path),
             "observed_continuum_file": str(continuum_path),
+            "continuum_spline_points_file": str(spline_points_path),
             "sensitivity_file": str(sens_path),
-            "reference_units": "1e-16 erg/s/cm^2/A",
+            "reference_units": FLUX_UNIT_LABEL,
         }
 
         tell_path = None
@@ -1088,6 +1406,13 @@ def _apply_science_calibrations(
         lam_sens = sens_arr[:, 0]
         sens = sens_arr[:, 1]
         lam_sens, sens = _trim_side_arrays(side, lam_sens, sens)
+        unit_scale = _calibration_flux_unit_scale(cal)
+        if unit_scale != 1.0:
+            print(
+                f"Converting selected {side} calibration from {cal.get('reference_units')} "
+                f"to {FLUX_UNIT_LABEL}."
+            )
+            sens = sens * unit_scale
         lam_flux, flux = apply_sensitivity(lam_sens, sens, lam_counts, counts)
         sigma_flux = None
         if sigma_counts is not None:
@@ -1170,45 +1495,10 @@ def _apply_science_calibrations(
             flux_paths[side] = existing
             print(f"Reusing existing flux-calibrated {side} spectrum for join -> {_find_existing_fluxcal_path(object_dir, side)}")
 
-    if "BLUE" in flux_paths and "RED" in flux_paths:
-        lam_b, flux_b, sig_b = flux_paths["BLUE"]
-        lam_r, flux_r, sig_r = flux_paths["RED"]
-        blue_scale, red_scale = interactive_rescale_and_approve_flux(
-            objname=object_dir.name,
-            lam_blue=lam_b,
-            flux_blue=flux_b,
-            lam_red=lam_r,
-            flux_red=flux_r,
-            outdir=final_dir,
-            show=True,
-            interactive=True,
-        )
-        flux_b_scaled = flux_b * blue_scale
-        flux_r_scaled = flux_r * red_scale
-        sig_b_scaled = sig_b * abs(blue_scale) if sig_b is not None else None
-        sig_r_scaled = sig_r * abs(red_scale) if sig_r is not None else None
+    if _join_science_flux_sides(object_dir, flux_paths, show_plots=show_plots):
+        return
 
-        lam_j, flux_j = concat_join(lam_b, flux_b_scaled, lam_r, flux_r_scaled)
-        if sig_b is not None and sig_r is not None:
-            lam_s, sig_j = concat_join(lam_b, sig_b_scaled, lam_r, sig_r_scaled)
-            order = np.argsort(lam_s)
-            sig_j = sig_j[order] if not np.allclose(lam_s, lam_j) else sig_j
-        else:
-            sig_j = None
-        out_path = final_dir / f"{object_dir.name}_BLUE+RED_spectrum.flm"
-        _save_spectrum(out_path, lam_j, flux_j, sig_j, "flux")
-        _plot_spectrum_png(
-            final_dir / f"{object_dir.name}_BLUE+RED_spectrum.png",
-            f"{object_dir.name}: final BLUE+RED spectrum",
-            lam_j,
-            flux_j,
-            sig_j,
-            show=True,
-        )
-        plot_join_diagnostic(object_dir.name, lam_b, flux_b_scaled, lam_r, flux_r_scaled,
-                             outpng=final_dir / f"{object_dir.name}_joined.png", show=show_plots)
-        print(f"Saved joined spectrum -> {out_path}")
-    elif len(flux_paths) == 1:
+    if len(flux_paths) == 1:
         side, (lam, flux, sigma) = next(iter(flux_paths.items()))
         out_path = final_dir / f"{object_dir.name}_{side}_spectrum.flm"
         _save_spectrum(out_path, lam, flux, sigma, "flux")
@@ -1231,10 +1521,17 @@ def extract_object(
     side: str = "both",
     show_plots: bool = False,
     redo_apertures: bool = False,
+    join_only: bool = False,
 ) -> None:
     object_dir = object_dir.expanduser().resolve()
     if not object_dir.exists():
         raise FileNotFoundError(object_dir)
+
+    if join_only:
+        if standard is True:
+            raise ValueError("--join-only is only valid for science reductions")
+        join_existing_science_sides(object_dir, show_plots=show_plots)
+        return
 
     if standard is None:
         standard = prompt("Is this a standard star? (y/n)", "n").lower().startswith("y")
