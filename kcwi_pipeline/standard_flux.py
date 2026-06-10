@@ -122,21 +122,21 @@ def ab_magnitudes(star_id: int) -> Tuple[np.ndarray, np.ndarray]:
     return wave.copy(), columns[star_id].copy()
 
 
-def abmag_to_flambda(wave_a: np.ndarray, abmag: np.ndarray, *, scaled_1e16: bool = True) -> np.ndarray:
+def abmag_to_flambda(wave_a: np.ndarray, abmag: np.ndarray, *, scale_1e15: bool = True) -> np.ndarray:
     """Convert AB magnitude to f_lambda.
 
-    Returns erg/s/cm^2/A by default scaled into KCWI cube units of
-    1e-16 erg/s/cm^2/A when scaled_1e16=True.
+    Returns erg/s/cm^2/A by default scaled into the pipeline output units of
+    1e-15 erg/s/cm^2/A when scale_1e15=True.
     """
     wave_a = np.asarray(wave_a, dtype=float)
     abmag = np.asarray(abmag, dtype=float)
     c_a_per_s = 2.99792458e18
     fnu = 10.0 ** (-0.4 * (abmag + 48.60))
     flam = fnu * c_a_per_s / (wave_a ** 2)
-    return flam / 1e-16 if scaled_1e16 else flam
+    return flam / 1e-15 if scale_1e15 else flam
 
 
-def reference_flux(star_id: int, wave_a: np.ndarray, *, scaled_1e16: bool = True) -> np.ndarray:
+def reference_flux(star_id: int, wave_a: np.ndarray, *, scale_1e15: bool = True) -> np.ndarray:
     wave_ab, ab = ab_magnitudes(star_id)
-    ref_coarse = abmag_to_flambda(wave_ab, ab, scaled_1e16=scaled_1e16)
+    ref_coarse = abmag_to_flambda(wave_ab, ab, scale_1e15=scale_1e15)
     return np.interp(np.asarray(wave_a, dtype=float), wave_ab, ref_coarse, left=np.nan, right=np.nan)

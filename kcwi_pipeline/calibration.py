@@ -9,6 +9,8 @@ from scipy.interpolate import UnivariateSpline
 
 from .utils import safe_filename, savefig_show
 
+FLUX_UNIT_LABEL = "1e-15 erg/s/cm^2/A"
+
 
 def truncate_spectrum(
     lam: np.ndarray,
@@ -141,6 +143,108 @@ def build_o2_transmission_template(
     return T_out, o2_mask
 
 
+def build_standard_telluric_template(
+    lam_std: np.ndarray,
+    C_std: np.ndarray,
+    continuum_std: np.ndarray,
+    telluric_windows: List[Tuple[float, float]],
+    min_T: float = 0.02,
+    smooth_s: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Build a normalized telluric transmission template from the flux standard.
+
+    This follows the UCSC/pydux idea: use the spectrophotometric standard as the
+    hot-star telluric source, divide by the fitted stellar continuum, and set
+    wavelengths outside telluric bands to unity.
+    """
+    lam_std = np.asarray(lam_std, dtype=float).ravel()
+    C_std = np.asarray(C_std, dtype=float).ravel()
+    continuum_std = np.asarray(continuum_std, dtype=float).ravel()
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        T = C_std / continuum_std
+
+    good = np.isfinite(lam_std) & np.isfinite(T) & np.isfinite(continuum_std) & (continuum_std > 0) & (T > 0)
+
+    tell_mask = np.zeros_like(lam_std, dtype=bool)
+    for lo, hi in telluric_windows:
+        tell_mask |= (lam_std >= lo) & (lam_std <= hi)
+
+    Tin = T.copy()
+    Tin[~(good & tell_mask)] = np.nan
+
+    if smooth_s is not None:
+        m = np.isfinite(Tin)
+        if np.count_nonzero(m) >= 4:
+            spl = UnivariateSpline(lam_std[m], Tin[m], s=smooth_s)
+            Tin = spl(lam_std)
+
+    Tin = np.clip(Tin, min_T, 1.0)
+    T_out = np.ones_like(lam_std, dtype=float)
+    T_out[tell_mask] = Tin[tell_mask]
+    return T_out, tell_mask
+
+
+def shifted_transmission(
+    lam_ref: np.ndarray,
+    T_std: np.ndarray,
+    shift_A: float,
+) -> np.ndarray:
+    """Evaluate a template shifted by ``shift_A`` Angstrom onto its own grid."""
+    return np.interp(lam_ref - float(shift_A), lam_ref, T_std, left=1.0, right=1.0)
+
+
+def estimate_telluric_shift(
+    lam_ref: np.ndarray,
+    F_fluxcal: np.ndarray,
+    T_std: np.ndarray,
+    telluric_windows: List[Tuple[float, float]],
+    max_shift_A: float = 5.0,
+    step_A: float = 0.1,
+) -> float:
+    """Estimate the wavelength shift that best aligns telluric absorption bands."""
+    lam_ref = np.asarray(lam_ref, dtype=float).ravel()
+    F_fluxcal = np.asarray(F_fluxcal, dtype=float).ravel()
+    T_std = np.asarray(T_std, dtype=float).ravel()
+
+    mask = np.zeros_like(lam_ref, dtype=bool)
+    for lo, hi in telluric_windows:
+        mask |= (lam_ref >= lo) & (lam_ref <= hi)
+    mask &= np.isfinite(lam_ref) & np.isfinite(F_fluxcal) & np.isfinite(T_std) & (T_std < 0.98)
+
+    if np.count_nonzero(mask) < 8:
+        return 0.0
+
+    wave = lam_ref[mask]
+    flux = F_fluxcal[mask]
+    med = np.nanmedian(flux)
+    if not np.isfinite(med) or med == 0:
+        return 0.0
+
+    flux_norm = flux / med
+    flux_depth = 1.0 - flux_norm
+    flux_depth -= np.nanmedian(flux_depth)
+    flux_std = np.nanstd(flux_depth)
+    if not np.isfinite(flux_std) or flux_std <= 0:
+        return 0.0
+
+    shifts = np.arange(-abs(max_shift_A), abs(max_shift_A) + 0.5 * step_A, abs(step_A))
+    best_shift = 0.0
+    best_score = -np.inf
+    for shift in shifts:
+        T_shift = np.interp(wave - shift, lam_ref, T_std, left=1.0, right=1.0)
+        temp_depth = 1.0 - T_shift
+        temp_depth -= np.nanmedian(temp_depth)
+        temp_std = np.nanstd(temp_depth)
+        if not np.isfinite(temp_std) or temp_std <= 0:
+            continue
+        score = float(np.nansum((flux_depth / flux_std) * (temp_depth / temp_std)))
+        if score > best_score:
+            best_score = score
+            best_shift = float(shift)
+    return best_shift
+
+
 def apply_o2_telluric_correction(
     F_fluxcal: np.ndarray,
     T_std: np.ndarray,
@@ -168,14 +272,41 @@ def scaled_o2_transmission(
     X_sci: Optional[float],
     o2_mask: np.ndarray,
     min_T: float = 0.02,
+    airmass_exponent: float = 1.0,
 ) -> np.ndarray:
     """Return the transmission curve actually used for an airmass-scaled O2 correction."""
     T_scaled = np.ones_like(T_std, dtype=float)
     if X_std is None or X_sci is None:
         return T_scaled
-    p = float(X_sci) / float(X_std)
+    p = (float(X_sci) / float(X_std)) ** float(airmass_exponent)
     T_scaled[o2_mask] = np.clip(T_std[o2_mask], min_T, 1.0) ** p
     return T_scaled
+
+
+def apply_standard_telluric_correction(
+    F_fluxcal: np.ndarray,
+    T_std: np.ndarray,
+    X_std: Optional[float],
+    X_sci: Optional[float],
+    telluric_mask: np.ndarray,
+    min_T: float = 0.02,
+    airmass_exponent: float = 0.55,
+) -> np.ndarray:
+    """Apply UCSC-style airmass-scaled telluric correction."""
+    if X_std is None or X_sci is None:
+        return F_fluxcal
+
+    T_scaled = scaled_o2_transmission(
+        T_std,
+        X_std,
+        X_sci,
+        telluric_mask,
+        min_T=min_T,
+        airmass_exponent=airmass_exponent,
+    )
+    F_corr = F_fluxcal.copy()
+    F_corr[telluric_mask] = F_fluxcal[telluric_mask] / np.clip(T_scaled[telluric_mask], min_T, 1.0)
+    return F_corr
 
 
 # ----------------------------
@@ -238,7 +369,7 @@ def plot_calibration_diagnostics(
     plt.plot(lam_ref, F_std_cal, lw=1.0, alpha=0.85, label="Calibrated standard")
     plt.xlim(lam_min, lam_max)
     plt.xlabel("Wavelength (Å)")
-    plt.ylabel("Flux")
+    plt.ylabel(f"Flux ({FLUX_UNIT_LABEL})")
     plt.title(f"{std_name} {side_u}: calibrated standard vs reference")
     plt.legend()
     savefig_show(outdir / f"{tag}_stdcheck.png", show)
@@ -246,8 +377,8 @@ def plot_calibration_diagnostics(
     # 4) telluric before/after (if provided)
     if side_u == "RED" and red_tell_before is not None and red_tell_after is not None:
         plt.figure(figsize=(10, 4))
-        plt.plot(lam_ref, red_tell_before, lw=1.0, alpha=0.7, label="Before O2 corr")
-        plt.plot(lam_ref, red_tell_after, lw=1.0, alpha=0.9, label="After O2 corr")
+        plt.plot(lam_ref, red_tell_before, lw=1.0, alpha=0.7, label="Before telluric corr")
+        plt.plot(lam_ref, red_tell_after, lw=1.0, alpha=0.9, label="After telluric corr")
         if telluric_windows:
             for (lo, hi) in telluric_windows:
                 lo2 = max(lo, lam_min)
@@ -256,8 +387,8 @@ def plot_calibration_diagnostics(
                     plt.axvspan(lo2, hi2, alpha=0.2)
         plt.xlim(lam_min, lam_max)
         plt.xlabel("Wavelength (Å)")
-        plt.ylabel("Flux")
-        plt.title(f"{std_name} RED: O2 correction")
+        plt.ylabel(f"Flux ({FLUX_UNIT_LABEL})")
+        plt.title(f"{std_name} RED: telluric correction")
         plt.legend()
         savefig_show(outdir / f"{tag}_telluric.png", show)
 
@@ -282,7 +413,7 @@ def plot_o2_template_diagnostic(
     plt.xlim(lo_lim, hi_lim)
     plt.xlabel("Wavelength (Å)")
     plt.ylabel("Transmission")
-    plt.title("O2 telluric template (standard)")
+    plt.title("Telluric template from spectrophotometric standard")
     savefig_show(outpng, show)
 
 
@@ -296,8 +427,8 @@ def plot_o2_before_after(
     show: bool,
 ) -> None:
     plt.figure(figsize=(10, 4))
-    plt.plot(lam_ref, F_before, lw=1.0, alpha=0.7, label="Before O2 corr")
-    plt.plot(lam_ref, F_after, lw=1.0, alpha=0.9, label="After O2 corr")
+    plt.plot(lam_ref, F_before, lw=1.0, alpha=0.7, label="Before telluric corr")
+    plt.plot(lam_ref, F_after, lw=1.0, alpha=0.9, label="After telluric corr")
     lo_lim = float(np.nanmin(lam_ref))
     hi_lim = float(np.nanmax(lam_ref))
     for lo, hi in o2_windows:
@@ -307,8 +438,8 @@ def plot_o2_before_after(
             plt.axvspan(lo2, hi2, alpha=0.2)
     plt.xlim(lo_lim, hi_lim)
     plt.xlabel("Wavelength (Å)")
-    plt.ylabel("Flux")
-    plt.title(f"{objname} RED: O2 correction")
+    plt.ylabel(f"Flux ({FLUX_UNIT_LABEL})")
+    plt.title(f"{objname} RED: telluric correction")
     plt.legend()
     savefig_show(outpng, show)
 
@@ -325,18 +456,21 @@ def plot_o2_correction_diagnostic(
     outpng: Path,
     show: bool,
 ) -> None:
-    """Detailed RED O2 diagnostic with full spectrum plus zoomed correction windows."""
-    fig, axes = plt.subplots(2, 2, figsize=(12, 7), constrained_layout=True)
+    """Detailed RED telluric diagnostic with full spectrum plus zoomed correction windows."""
+    nwin = max(1, len(o2_windows))
+    fig, axes = plt.subplots(2, nwin + 1, figsize=(4.2 * (nwin + 1), 7), constrained_layout=True)
+    if nwin == 1:
+        axes = np.asarray(axes).reshape(2, 2)
     ax_full = axes[0, 0]
     ax_trans = axes[1, 0]
-    zoom_axes = [axes[0, 1], axes[1, 1]]
+    zoom_axes = axes[:, 1:].ravel()
 
-    ax_full.plot(lam_ref, F_before, lw=0.9, alpha=0.65, label="Before O2 corr")
-    ax_full.plot(lam_ref, F_after, lw=0.9, alpha=0.9, label="After O2 corr")
+    ax_full.plot(lam_ref, F_before, lw=0.9, alpha=0.65, label="Before telluric corr")
+    ax_full.plot(lam_ref, F_after, lw=0.9, alpha=0.9, label="After telluric corr")
     for lo, hi in o2_windows:
         ax_full.axvspan(lo, hi, alpha=0.15)
     ax_full.set_xlabel("Wavelength (A)")
-    ax_full.set_ylabel("Flux")
+    ax_full.set_ylabel(f"Flux ({FLUX_UNIT_LABEL})")
     ax_full.set_title(f"{objname} RED: full spectrum")
     ax_full.legend()
 
@@ -360,9 +494,12 @@ def plot_o2_correction_diagnostic(
         ax.set_xlim(lo, hi)
         ax_t.set_ylim(0, 1.05)
         ax.set_xlabel("Wavelength (A)")
-        ax.set_ylabel("Flux")
+        ax.set_ylabel(f"Flux ({FLUX_UNIT_LABEL})")
         ax_t.set_ylabel("T scaled")
-        ax.set_title(f"O2 window {lo:.0f}-{hi:.0f} A")
+        ax.set_title(f"Telluric window {lo:.0f}-{hi:.0f} A")
+
+    for ax in zoom_axes[len(o2_windows):]:
+        ax.axis("off")
 
     outpng = Path(outpng)
     outpng.parent.mkdir(parents=True, exist_ok=True)

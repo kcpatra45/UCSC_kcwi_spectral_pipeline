@@ -738,7 +738,7 @@ def review_apertures(img: np.ndarray,
         _preview_apertures_blocking(img, aps, title=f"{side_label} apertures preview")
 
         choice = prompt(
-            "Approve apertures? [a=approve, rt=redraw target, rb=redraw background, t=move target, b=move background, p=edit params, q=quit]",
+            "Approve apertures? [a=approve, rt=redraw target, st=change target shape, rb=redraw background, sb=change background shape, t=move target, b=move background, p=edit params, q=quit]",
             "a",
         ).lower().strip()
 
@@ -758,6 +758,17 @@ def review_apertures(img: np.ndarray,
                 print("No target aperture drawn; TARGET not changed.")
             continue
 
+        if choice == "st":
+            new_kind = prompt("New target shape (circle/ellipse/rect/square)", aps.target.shape).lower().strip()
+            try:
+                aps = TargetBackgroundApertures(
+                    target=_draw_shape_by_drag(img, new_kind, title=f"{side_label} change TARGET shape"),
+                    background=aps.background,
+                )
+            except RuntimeError:
+                print("No target aperture drawn; TARGET not changed.")
+            continue
+
         if choice == "rb":
             try:
                 aps = TargetBackgroundApertures(
@@ -769,6 +780,40 @@ def review_apertures(img: np.ndarray,
                         reference_shapes=(aps.target,),
                     ),
                 )
+            except RuntimeError:
+                print("No background region drawn; BACKGROUND not changed.")
+            continue
+
+        if choice == "sb":
+            new_kind = prompt(
+                "New background shape (auto_ellipse_annulus/auto_circle_annulus/ellipse_annulus/circle_annulus/ellipse/circle/rect)",
+                aps.background.shape,
+            ).lower().strip()
+            try:
+                if new_kind == "auto_ellipse_annulus":
+                    bkg = _auto_background_from_target(aps.target, "ellipse_annulus")
+                    bkg = _drag_move_shape(
+                        img,
+                        bkg,
+                        title=f"{side_label} change BACKGROUND shape",
+                        reference_shapes=(aps.target,),
+                    )
+                elif new_kind == "auto_circle_annulus":
+                    bkg = _auto_background_from_target(aps.target, "circle_annulus")
+                    bkg = _drag_move_shape(
+                        img,
+                        bkg,
+                        title=f"{side_label} change BACKGROUND shape",
+                        reference_shapes=(aps.target,),
+                    )
+                else:
+                    bkg = _draw_shape_by_drag(
+                        img,
+                        new_kind,
+                        title=f"{side_label} change BACKGROUND shape",
+                        reference_shapes=(aps.target,),
+                    )
+                aps = TargetBackgroundApertures(target=aps.target, background=bkg)
             except RuntimeError:
                 print("No background region drawn; BACKGROUND not changed.")
             continue
@@ -806,7 +851,7 @@ def review_apertures(img: np.ndarray,
             aps = TargetBackgroundApertures(target=aps_t, background=aps_b)
             continue
 
-        print("Unrecognized option; please choose a/rt/rb/t/b/p/q.")
+        print("Unrecognized option; please choose a/rt/st/rb/sb/t/b/p/q.")
 
 
 def interactive_define_apertures(img: np.ndarray,

@@ -15,14 +15,16 @@ from scipy.interpolate import UnivariateSpline
 
 from .apertures import aperture_weight_mask, interactive_define_apertures, plot_apertures, review_apertures
 from .calibration import (
-    apply_o2_telluric_correction,
+    apply_standard_telluric_correction,
     apply_sensitivity,
-    build_o2_transmission_template,
+    build_standard_telluric_template,
+    estimate_telluric_shift,
     plot_calibration_diagnostics,
     plot_o2_before_after,
     plot_o2_correction_diagnostic,
     plot_o2_template_diagnostic,
     scaled_o2_transmission,
+    shifted_transmission,
 )
 from .config import TargetBackgroundApertures
 from .io import get_airmass_from_header, get_lambda_axis, white_light
@@ -38,9 +40,21 @@ DEFAULT_SIDE_RANGES = {
 }
 
 FLUX_UNIT_LABEL = "1e-15 erg/s/cm^2/A"
-O2_WINDOWS = [(6860.0, 6935.0), (7590.0, 7690.0)]
+TELLURIC_WINDOWS = [
+    (5890.0, 5896.0),
+    (6270.0, 6330.0),
+    (6860.0, 6935.0),
+    (7160.0, 7340.0),
+    (7590.0, 7700.0),
+    (8120.0, 8350.0),
+]
+TELLURIC_ALIGNMENT_WINDOWS = [(6860.0, 6935.0), (7590.0, 7700.0)]
+O2_WINDOWS = TELLURIC_WINDOWS
 TELLURIC_MIN_T = 0.02
 TELLURIC_TEMPLATE_SMOOTH_S = 0.001
+TELLURIC_AIRMASS_EXPONENT = 0.55
+TELLURIC_MAX_SHIFT_A = 5.0
+TELLURIC_SHIFT_STEP_A = 0.1
 BACKGROUND_CLIP_SIGMA = 2.5
 BACKGROUND_CLIP_MAXITERS = 5
 COADD_CLIP_SIGMA = 2.0
@@ -927,6 +941,136 @@ def interactive_continuum_spline(
     return continuum, sensitivity, sorted(points, key=lambda item: item[0])
 
 
+def _normalized_for_telluric_plot(lam: np.ndarray, flux: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    m = np.isfinite(lam) & np.isfinite(flux) & (lam >= lo) & (lam <= hi)
+    if np.count_nonzero(m) < 3:
+        return np.full_like(flux, np.nan, dtype=float)
+    scale = np.nanpercentile(flux[m], 90)
+    if not np.isfinite(scale) or scale == 0:
+        scale = np.nanmedian(flux[m])
+    if not np.isfinite(scale) or scale == 0:
+        return np.full_like(flux, np.nan, dtype=float)
+    return flux / scale
+
+
+def interactive_telluric_shift(
+    objname: str,
+    lam_flux: np.ndarray,
+    flux_before: np.ndarray,
+    t_std: np.ndarray,
+    telluric_mask: np.ndarray,
+    x_std: float,
+    x_sci: float,
+    initial_shift_A: float,
+) -> float:
+    """Review and manually refine the telluric wavelength shift using O2 A/B bands."""
+    shift = float(initial_shift_A)
+    accepted = {"done": False, "shift": shift}
+
+    fig, axes = plt.subplots(
+        2,
+        len(TELLURIC_ALIGNMENT_WINDOWS),
+        figsize=(6.0 * len(TELLURIC_ALIGNMENT_WINDOWS), 7.2),
+        squeeze=False,
+    )
+    fig.subplots_adjust(bottom=0.18, top=0.86, wspace=0.25, hspace=0.35)
+    fig.suptitle(
+        f"{objname} RED telluric alignment\n"
+        "O2 B and A bands only. Positive shift moves the template redward."
+    )
+
+    line_telluric = []
+    line_after = []
+    panels = []
+    for col, (lo, hi) in enumerate(TELLURIC_ALIGNMENT_WINDOWS):
+        pad = 12.0
+        m = np.isfinite(lam_flux) & (lam_flux >= lo - pad) & (lam_flux <= hi + pad)
+        before_norm = _normalized_for_telluric_plot(lam_flux, flux_before, lo, hi)
+
+        ax = axes[0, col]
+        ax.plot(lam_flux[m], before_norm[m], lw=0.9, color="tab:red", label="Science before, normalized")
+        tell_line, = ax.plot(lam_flux[m], np.ones(np.count_nonzero(m)), lw=1.0, color="tab:green",
+                             label="Shifted/scaled telluric T")
+        ax.axvspan(lo, hi, alpha=0.12, color="tab:orange")
+        ax.set_xlim(lo - pad, hi + pad)
+        ax.set_ylim(0, 1.15)
+        ax.set_xlabel("Wavelength (A)")
+        ax.set_ylabel("Normalized flux / T")
+        ax.set_title(f"O2 {'B' if hi < 7000 else 'A'} band")
+        ax.grid(alpha=0.2)
+        ax.legend(fontsize=8)
+
+        ax2 = axes[1, col]
+        ax2.plot(lam_flux[m], before_norm[m], lw=0.8, color="tab:red", alpha=0.7, label="Before")
+        after_line, = ax2.plot(lam_flux[m], before_norm[m], lw=0.9, color="k", label="After")
+        ax2.axvspan(lo, hi, alpha=0.12, color="tab:orange")
+        ax2.set_xlim(lo - pad, hi + pad)
+        ax2.set_xlabel("Wavelength (A)")
+        ax2.set_ylabel("Normalized flux")
+        ax2.set_title("Correction preview")
+        ax2.grid(alpha=0.2)
+        ax2.legend(fontsize=8)
+
+        panels.append((m, lo, hi))
+        line_telluric.append(tell_line)
+        line_after.append(after_line)
+
+    slider_ax = fig.add_axes([0.16, 0.075, 0.58, 0.035])
+    accept_ax = fig.add_axes([0.79, 0.06, 0.13, 0.06])
+    shift_slider = Slider(
+        slider_ax,
+        "Shift (A)",
+        -TELLURIC_MAX_SHIFT_A,
+        TELLURIC_MAX_SHIFT_A,
+        valinit=shift,
+        valstep=TELLURIC_SHIFT_STEP_A,
+    )
+    accept_button = Button(accept_ax, "Accept")
+
+    def update(new_shift: float) -> None:
+        accepted["shift"] = float(new_shift)
+        t_shifted = shifted_transmission(lam_flux, t_std, accepted["shift"])
+        t_scaled = scaled_o2_transmission(
+            t_shifted,
+            x_std,
+            x_sci,
+            telluric_mask,
+            min_T=TELLURIC_MIN_T,
+            airmass_exponent=TELLURIC_AIRMASS_EXPONENT,
+        )
+        flux_after = apply_standard_telluric_correction(
+            flux_before,
+            t_shifted,
+            x_std,
+            x_sci,
+            telluric_mask,
+            min_T=TELLURIC_MIN_T,
+            airmass_exponent=TELLURIC_AIRMASS_EXPONENT,
+        )
+        for i, (m, lo, hi) in enumerate(panels):
+            line_telluric[i].set_ydata(t_scaled[m])
+            line_after[i].set_ydata(_normalized_for_telluric_plot(lam_flux, flux_after, lo, hi)[m])
+        fig.suptitle(
+            f"{objname} RED telluric alignment: shift={accepted['shift']:.3f} A\n"
+            "O2 B and A bands only. Positive shift moves the template redward."
+        )
+        fig.canvas.draw_idle()
+
+    def accept(_event) -> None:
+        accepted["done"] = True
+        plt.close(fig)
+
+    shift_slider.on_changed(update)
+    accept_button.on_clicked(accept)
+    update(shift)
+    plt.show()
+    plt.close(fig)
+
+    if not accepted["done"]:
+        raise RuntimeError("Telluric shift was not accepted")
+    return float(accepted["shift"])
+
+
 def _extract_side(
     object_dir: Path,
     side: str,
@@ -1258,44 +1402,63 @@ def _build_standard_calibrations(
         final_standard_flux = flux_cal_std
         final_standard_sigma = sigma_flux_std
         if side == "RED":
-            t_o2, o2_mask = build_o2_transmission_template(
-                lam_ref=lam_std,
-                F_ref=flux_ref,
+            t_o2, o2_mask = build_standard_telluric_template(
                 lam_std=lam_std,
                 C_std=counts,
-                S_sens=sens,
-                o2_windows=O2_WINDOWS,
+                continuum_std=continuum,
+                telluric_windows=O2_WINDOWS,
                 min_T=TELLURIC_MIN_T,
                 smooth_s=TELLURIC_TEMPLATE_SMOOTH_S,
             )
-            tell_path = outdir / "telluric_O2_template_RED.txt"
+            tell_path = outdir / "telluric_standard_template_RED.txt"
             np.savetxt(tell_path, np.c_[lam_std, t_o2, o2_mask.astype(int)],
-                       header="lambda_A  T_O2_std  in_O2mask")
+                       header="lambda_A  T_telluric_std  in_telluric_mask")
             mask_path = str(tell_path)
             tell_before = flux_cal_std
-            tell_after = apply_o2_telluric_correction(
-                flux_cal_std, t_o2, 1.0, 1.0, o2_mask, min_T=TELLURIC_MIN_T
+            tell_after = apply_standard_telluric_correction(
+                flux_cal_std,
+                t_o2,
+                1.0,
+                1.0,
+                o2_mask,
+                min_T=TELLURIC_MIN_T,
+                airmass_exponent=TELLURIC_AIRMASS_EXPONENT,
             )
             if sigma_flux_std is not None:
-                final_standard_sigma = apply_o2_telluric_correction(
-                    sigma_flux_std, t_o2, 1.0, 1.0, o2_mask, min_T=TELLURIC_MIN_T
+                final_standard_sigma = apply_standard_telluric_correction(
+                    sigma_flux_std,
+                    t_o2,
+                    1.0,
+                    1.0,
+                    o2_mask,
+                    min_T=TELLURIC_MIN_T,
+                    airmass_exponent=TELLURIC_AIRMASS_EXPONENT,
                 )
             final_standard_flux = tell_after
-            t_scaled_std = scaled_o2_transmission(t_o2, 1.0, 1.0, o2_mask, min_T=TELLURIC_MIN_T)
+            t_scaled_std = scaled_o2_transmission(
+                t_o2,
+                1.0,
+                1.0,
+                o2_mask,
+                min_T=TELLURIC_MIN_T,
+                airmass_exponent=TELLURIC_AIRMASS_EXPONENT,
+            )
             std_tell_path = outdir / "standard_fluxcal_RED_tellcorr.flm"
             np.savetxt(
                 std_tell_path,
                 np.c_[lam_std, tell_before, tell_after],
-                header="lambda_A  standard_flux_before_O2  standard_flux_after_O2",
+                header="lambda_A  standard_flux_before_telluric  standard_flux_after_telluric",
             )
             plot_o2_template_diagnostic(lam_std, t_o2, O2_WINDOWS,
-                                        outdir / "O2_template_RED.png", show=True)
+                                        outdir / "telluric_template_RED.png", show=True)
             plot_o2_template_diagnostic(lam_std, t_o2, O2_WINDOWS,
-                                        object_diag_dir / "O2_template_RED.png", show=False)
+                                        object_diag_dir / "telluric_template_RED.png", show=False)
             item["telluric_file"] = str(tell_path)
+            item["telluric_source"] = "same_spectrophotometric_standard"
+            item["telluric_airmass_exponent"] = TELLURIC_AIRMASS_EXPONENT
             item["x_std"] = _mean_airmass_for_side(object_dir, side)
             if item["x_std"] is None:
-                print("WARNING: RED standard airmass not found; science O2 correction will be skipped unless registry x_std is set.")
+                print("WARNING: RED standard airmass not found; science telluric correction will be skipped unless registry x_std is set.")
             else:
                 print(f"RED standard mean airmass: X_std={item['x_std']:.4f}")
 
@@ -1428,18 +1591,57 @@ def _apply_science_calibrations(
             x_sci = _mean_airmass_for_side(object_dir, side)
             if x_std is None or x_sci is None:
                 print(
-                    f"WARNING: Skipping RED O2 telluric correction for {object_dir.name}; "
+                    f"WARNING: Skipping RED telluric correction for {object_dir.name}; "
                     f"standard/science airmass unavailable (X_std={x_std}, X_sci={x_sci})."
                 )
             else:
                 flux_before_telluric = flux.copy()
-                t_scaled = scaled_o2_transmission(t_std, x_std, x_sci, o2_mask, min_T=TELLURIC_MIN_T)
-                flux = apply_o2_telluric_correction(
-                    flux, t_std, x_std, x_sci, o2_mask, min_T=TELLURIC_MIN_T
+                tell_shift_A = estimate_telluric_shift(
+                    lam_flux,
+                    flux,
+                    t_std,
+                    TELLURIC_ALIGNMENT_WINDOWS,
+                    max_shift_A=TELLURIC_MAX_SHIFT_A,
+                    step_A=TELLURIC_SHIFT_STEP_A,
+                )
+                print(f"Initial RED telluric shift estimate from O2 A/B bands: {tell_shift_A:.3f} A")
+                tell_shift_A = interactive_telluric_shift(
+                    object_dir.name,
+                    lam_flux,
+                    flux_before_telluric,
+                    t_std,
+                    o2_mask,
+                    x_std,
+                    x_sci,
+                    tell_shift_A,
+                )
+                t_shifted = shifted_transmission(lam_flux, t_std, tell_shift_A)
+                t_scaled = scaled_o2_transmission(
+                    t_shifted,
+                    x_std,
+                    x_sci,
+                    o2_mask,
+                    min_T=TELLURIC_MIN_T,
+                    airmass_exponent=TELLURIC_AIRMASS_EXPONENT,
+                )
+                flux = apply_standard_telluric_correction(
+                    flux,
+                    t_shifted,
+                    x_std,
+                    x_sci,
+                    o2_mask,
+                    min_T=TELLURIC_MIN_T,
+                    airmass_exponent=TELLURIC_AIRMASS_EXPONENT,
                 )
                 if sigma_flux is not None:
-                    sigma_flux = apply_o2_telluric_correction(
-                        sigma_flux, t_std, x_std, x_sci, o2_mask, min_T=TELLURIC_MIN_T
+                    sigma_flux = apply_standard_telluric_correction(
+                        sigma_flux,
+                        t_shifted,
+                        x_std,
+                        x_sci,
+                        o2_mask,
+                        min_T=TELLURIC_MIN_T,
+                        airmass_exponent=TELLURIC_AIRMASS_EXPONENT,
                     )
                 plot_o2_before_after(
                     object_dir.name,
@@ -1455,7 +1657,7 @@ def _apply_science_calibrations(
                     lam_flux,
                     flux_before_telluric,
                     flux,
-                    t_std,
+                    t_shifted,
                     t_scaled,
                     o2_mask,
                     O2_WINDOWS,
@@ -1465,14 +1667,21 @@ def _apply_science_calibrations(
                 np.savetxt(
                     flux_dir / f"{object_dir.name}_RED_fluxcal_before_telluric.flm",
                     np.c_[lam_flux, flux_before_telluric],
-                    header="lambda_A  flux_before_O2_telluric",
+                    header="lambda_A  flux_before_telluric",
                 )
                 np.savetxt(
                     flux_dir / f"{object_dir.name}_RED_telluric_correction_arrays.txt",
-                    np.c_[lam_flux, flux_before_telluric, t_std, t_scaled, flux],
-                    header="lambda_A  flux_before_O2  T_std  T_airmass_scaled  flux_after_O2",
+                    np.c_[lam_flux, flux_before_telluric, t_std, t_shifted, t_scaled, flux],
+                    header=(
+                        "lambda_A  flux_before_telluric  T_std_unshifted  "
+                        f"T_std_shifted_shift_A_{tell_shift_A:.3f}  "
+                        "T_airmass_scaled  flux_after_telluric"
+                    ),
                 )
-                print(f"Applied RED O2 telluric correction with X_std={x_std:.4f}, X_sci={x_sci:.4f}.")
+                print(
+                    f"Applied RED telluric correction with X_std={x_std:.4f}, "
+                    f"X_sci={x_sci:.4f}, shift={tell_shift_A:.3f} A."
+                )
 
         out_path = flux_dir / f"{object_dir.name}_{side}_fluxcal.flm"
         _save_spectrum(out_path, lam_flux, flux, sigma_flux, "flux")

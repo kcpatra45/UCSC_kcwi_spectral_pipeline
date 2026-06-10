@@ -70,7 +70,14 @@ class TargetBackgroundApertures:
 class CalibrationConfig:
     spline_s_init: float = 0.05
     telluric_windows: List[Tuple[float, float]] = field(
-        default_factory=lambda: [(6860, 6925), (7590, 7670)]
+        default_factory=lambda: [
+            (5890, 5896),
+            (6270, 6330),
+            (6860, 6935),
+            (7160, 7340),
+            (7590, 7700),
+            (8120, 8350),
+        ]
     )
     telluric_template_smooth_s: Optional[float] = 0.001
     telluric_min_T: float = 0.02

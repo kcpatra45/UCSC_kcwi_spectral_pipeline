@@ -35,6 +35,11 @@ def main() -> None:
     p_ext.add_argument("--calib-dir", type=str, default=None, help="Master calibration directory")
     p_ext.add_argument("--show-plots", action="store_true", help="Show interactive/diagnostic plots")
     p_ext.add_argument("--redo-apertures", action="store_true", help="Ignore saved apertures and redefine them")
+    p_ext.add_argument(
+        "--join-only",
+        action="store_true",
+        help="Skip extraction/calibration and redo only the BLUE+RED scaling/join from existing fluxcal spectra",
+    )
 
     args = parser.parse_args()
 
@@ -58,6 +63,7 @@ def main() -> None:
             side=args.side,
             show_plots=bool(args.show_plots),
             redo_apertures=bool(args.redo_apertures),
+            join_only=bool(args.join_only),
         )
         return
 
