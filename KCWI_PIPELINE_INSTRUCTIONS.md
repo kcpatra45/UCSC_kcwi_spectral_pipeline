@@ -519,31 +519,56 @@ sensitivity = reference_flux / observed_standard_continuum
 
 The AB reference flux and sensitivity function are scaled so calibrated outputs are in `1e-15 erg/s/cm^2/A`.
 
-If an older calibration registry entry was created when the pipeline used `1e-16 erg/s/cm^2/A`, the science extraction step converts that sensitivity to the new `1e-15` scale before applying it. For consistency, rebuilding standards after this change is still recommended.
 
-RED telluric correction uses an O2 transmission template from the RED standard:
+RED telluric correction uses a normalized atmospheric transmission template
+from the RED standard. During the RED standard continuum fit, the telluric
+windows are excluded from the spline so the absorption troughs remain in the
+standard spectrum. The template is then:
 
 ```text
-T_std = flux_calibrated_standard / reference_flux
+T_std = observed_standard_counts / fitted_standard_continuum
 ```
 
-For science RED spectra, the template is scaled by the airmass ratio:
+Outside the telluric windows, the template is set to unity. Inside the
+telluric windows, values are clipped to the configured minimum transmission
+before correction.
+
+For science RED spectra, the pipeline first estimates a wavelength shift for
+the telluric template using the O2 B and A bands, then opens an interactive
+alignment plot so the shift can be reviewed or adjusted. Positive shifts move
+the template redward. The shifted template is then scaled by the standard and
+science airmasses:
 
 ```text
-T_scaled = T_std ** (X_sci / X_std)
+T_shifted = shifted(T_std, shift_A)
+T_scaled = T_shifted ** ((X_sci / X_std) ** 0.55)
 flux_corrected = flux_uncorrected / T_scaled
 ```
 
-The correction is applied only in the O2 windows:
+The correction is applied only in these RED telluric windows:
+
+```text
+5890-5896 A
+6270-6330 A
+6860-6935 A
+7160-7340 A
+7590-7700 A
+8120-8350 A
+```
+
+The automatic wavelength-shift estimate uses only:
 
 ```text
 6860-6935 A
-7590-7690 A
+7590-7700 A
 ```
 
 Science RED telluric diagnostics:
 
 ```text
+calibrations/STANDARD/RED/telluric_standard_template_RED.txt
+calibrations/STANDARD/RED/telluric_template_RED.png
+fluxcal/OBJECT_RED_fluxcal_before_telluric.flm
 fluxcal/OBJECT_RED_telluric_correction.png
 fluxcal/OBJECT_RED_telluric_detail.png
 fluxcal/OBJECT_RED_telluric_correction_arrays.txt
