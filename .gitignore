@@ -1,0 +1,39 @@
+# macOS
+.DS_Store
+
+# Python cache/build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and local config
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Astronomy data products and local outputs
+*.fits
+*.fits.gz
+*.fz
+data/
+raw_data/
+reduced_data/
+output/
+outputs/
+products/
