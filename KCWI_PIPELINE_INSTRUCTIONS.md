@@ -1,6 +1,6 @@
-# KCWI IFU Reduction Pipeline Instructions
+# KCWI Spectral Reduction Pipeline Instructions
 
-This guide describes the current object-local KCWI reduction workflow for KOA/KCWI DRP Level 2 `*_icubes.fits` files.
+This guide describes the KCWI spectral reduction workflow for KOA/KCWI DRP Level 2 `*_icubes.fits` files.
 
 The expected workflow is:
 
@@ -12,7 +12,7 @@ The expected workflow is:
 
 ## Dependencies
 
-Beyond the Python standard library, the pipeline uses:
+The pipeline uses:
 
 ```text
 numpy
@@ -96,9 +96,9 @@ During standard extraction, the pipeline will:
 - show the extracted standard spectrum and reference flux;
 - let you add/delete/move spline points for the continuum fit;
 - load previously saved continuum spline points when the same standard/side is redone;
-- for RED standards, exclude O2 telluric windows from the continuum fit;
+- for RED standards, exclude telluric windows from the continuum fit;
 - build sensitivity functions;
-- for RED standards, build an O2 telluric template;
+- for RED standards, build a telluric template;
 - save calibration products in the master project calibration directory;
 - also save object-local standard diagnostics and processed spectra.
 
@@ -165,7 +165,7 @@ During science extraction, the pipeline will:
 - save and display a coadd diagnostic plot;
 - ask which standard calibration to use for each side;
 - apply sensitivity functions;
-- for RED, apply the O2 telluric correction using the standard/science airmass ratio;
+- apply the telluric correction;
 - save side-level flux-calibrated spectra;
 - if both sides are available, run the join/scale/approve step;
 - save the final spectrum as `.flm` and `.png`.
@@ -256,14 +256,10 @@ r                reset spline points
 q                quit
 ```
 
-For RED standards, the O2 telluric windows are shaded and excluded from the continuum fit:
+The telluric windows are shaded and excluded from the continuum fit:
 
-```text
-6860-6935 A
-7590-7690 A
-```
 
-This preserves the telluric absorption troughs so the RED telluric template is built correctly.
+This preserves the telluric absorption troughs so the telluric template is built correctly.
 
 ## 6. Join and Approve Controls
 
@@ -390,7 +386,6 @@ fluxcal/SCIENCE_OBJECT_NAME_BLUE_fluxcal.flm
 fluxcal/SCIENCE_OBJECT_NAME_RED_fluxcal.flm
 ```
 
-For backward compatibility, older `.txt` side flux files can still be read if present.
 
 ### Redo Only the BLUE+RED Scaling and Join
 
@@ -473,10 +468,6 @@ final/OBJECT_join_scale.txt
 ```
 
 ## 9. Coaddition Logic
-
-The pipeline no longer coadds cubes before extraction in the main object-local workflow.
-
-Instead:
 
 1. Extract each individual `*_icubes.fits` exposure.
 2. Interpolate spectra onto the first exposure wavelength grid if needed.
